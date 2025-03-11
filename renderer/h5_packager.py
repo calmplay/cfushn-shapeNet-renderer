@@ -47,6 +47,7 @@ def package_h5():
 
                     # 如果背景透明,增加特殊处理:转为纯白色
                     if cfg.bg_transparent:
+                        # 注意: 如果存在渲染失败保存的残缺PNG图片,这里会报错
                         img = Image.open(img_path).convert("RGBA")  # (H, W, 4)
                         img_np = np.array(img)  # 转换为 NumPy 数组 (H, W, 4)
                         # 分离 RGB 和 Alpha 通道
@@ -86,7 +87,3 @@ def package_h5():
         h5f.create_dataset("labels", data=labels_array)
 
     print(f"Saved: {h5_file_path}")
-
-
-if __name__ == "__main__":
-    package_h5()

@@ -4,8 +4,10 @@
 # @Comments: 
 # @Software: PyCharm
 
+import multiprocessing
 import os
 import random
+import signal
 
 from joblib import Parallel, delayed
 
@@ -39,30 +41,43 @@ if __name__ == "__main__":
     obj_batch = []  # 每个任务处理的obj批次
     task_list = []  # 任务列表
 
-    for class_id in class_id_list:
-        files = os.listdir(os.path.join(str(cfg.data_folder), class_id))
-        # for file in files:
-        for file in random.sample(files, 10):  # test1: 随机找
-            obj_batch.append(file)
-            # 每个task最多处理batch_size个obj
-            if len(obj_batch) == obj_batch_size:
+    try:
+        for class_id in class_id_list:
+            files = os.listdir(os.path.join(str(cfg.data_folder), class_id))
+            # for file in files:
+            for file in random.sample(files, 5):  # test1: 随机找
+                obj_batch.append(file)
+                # 每个task最多处理batch_size个obj
+                if len(obj_batch) == obj_batch_size:
+                    task_list.append((class_id, obj_batch))
+                    obj_batch = []
+            # 最后一个不满batch_size个
+            if len(obj_batch) > 0:
                 task_list.append((class_id, obj_batch))
                 obj_batch = []
-        # 最后一个不满batch_size个
-        if len(obj_batch) > 0:
-            task_list.append((class_id, obj_batch))
-            obj_batch = []
 
-    # 预览全部任务列表
-    print(f"\n{task_list}\n")
+        # 预览全部任务列表
+        print(f"\n预览全部任务列表:\n{task_list}\n")
 
-    # 并行处理
-    with Parallel(n_jobs=parallel_num) as parallel:
-        parallel(delayed(render_task)(class_id, obj_batch) for class_id, obj_batch in task_list)
+        # 并行处理
+        with Parallel(n_jobs=parallel_num) as parallel:
+            parallel(delayed(render_task)(class_id, obj_batch) for class_id, obj_batch in task_list)
 
-    # 等待上面任务全部结束后整合为h5文件
-    if (not cfg.is_test) and cfg.h5_output:
-        package_h5()
+        # 等待上面任务全部结束后整合为h5文件
+        if (not cfg.is_test) and cfg.h5_output:
+            # 注意: 如果存在渲染失败保存的残缺PNG图片在文件夹中，会导致h5文件无法生成
+            package_h5()
+    except KeyboardInterrupt:
+        print("Interrupted! Cleaning up...")
+    finally:
+        # 主进程关闭时清理子进程
+        parent_pid = os.getpid()
+        try:
+            for proc in multiprocessing.active_children():
+                os.kill(proc.pid, signal.SIGTERM)  # 终止子进程
+            print("All child processes have been terminated.")
+        except Exception as e:
+            print(f"Error terminating child processes: {e}")
 
 """
 Airplane 02691156

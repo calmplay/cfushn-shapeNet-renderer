@@ -97,7 +97,7 @@ def render_shapeNet(class_id, model_id):
     # 渲染预览图时,临时关闭额外通道输出
     with disable_multi_output():
         # locate_camera(3, 20.0, 45.0)
-        locate_camera(bound_radius, 15.0, 45.0, 100)
+        locate_camera(bound_radius, 15.0, 45.0, 200)
         render.filepath = os.path.join(cfg.out_folder, "preview", f"{class_id}_{model_id}.png")
         print("Saved for preview:")
         os.makedirs(os.path.join(cfg.out_folder, "preview"), exist_ok=True)
