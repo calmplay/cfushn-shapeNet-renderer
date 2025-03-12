@@ -7,6 +7,7 @@
 import argparse
 import math
 import os
+import random
 import sys
 from contextlib import contextmanager
 
@@ -123,6 +124,12 @@ def render_shapeNet(class_id, model_id):
         while elevation_degree <= cfg.elevation_max:
             azimuth_degree = cfg.azimuth_min
             while azimuth_degree <= cfg.azimuth_max:
+
+                if random.random() <= cfg.render_dropout:  # random.random() in [0,1)
+                    # 用概率控制生成数量
+                    azimuth_degree += cfg.azimuth_step_degree  # 水平旋转角度++
+                    continue
+
                 # 相机位置调整
                 locate_camera(bound_radius, elevation_degree, azimuth_degree)
                 # 设置输出路径,分文件夹存放

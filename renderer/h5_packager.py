@@ -1,89 +1,127 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2025/3/9 15:59
-# @Author  : cfushn
-# @Comments: 
-# @Software: PyCharm
-
+import gc
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import h5py
 import numpy as np
 from PIL import Image
 
-from .config import cfg
+try:
+    from .config import cfg  # 适用于包内导入
+except ImportError:
+    from config import cfg  # 适用于独立运行（主脚本）
 
 
 def package_h5():
-    # 定义数据目录和 H5 文件路径
-    raw_folder = cfg.out_folder
+    """ 分批处理图片并流式写入 HDF5 """
+    raw_folder = cfg.out_folder  # 原始数据目录
     r = cfg.resolution
     h5_file_path = os.path.join(cfg.out_folder, f"shapeNet_{r}x{r}.h5")
 
-    print(f"Preparing for packaging shapeNet_{r}x{r}.h5 ...")
+    print(f"Prepare packaging {h5_file_path} ...")
 
-    # 创建 H5 文件
-    with h5py.File(h5_file_path, "w") as h5f:
-        img_list = []
-        class_list = []
-        labels_list = []
-
-        for class_id in os.listdir(raw_folder):  # 遍历类别
-
-            class_path = os.path.join(raw_folder, class_id)
-            if class_id == "preview" or (not os.path.isdir(class_path)):
-                # 若文件夹名称为"preview"(预览文件夹),或非文件夹,跳过
+    # 获取所有图片路径
+    image_classes = []
+    image_paths = []
+    for class_id in os.listdir(raw_folder):
+        class_path = os.path.join(raw_folder, class_id)
+        if not os.path.isdir(class_path) or class_id == "preview":
+            continue
+        for model_id in os.listdir(class_path):
+            model_path = os.path.join(class_path, model_id)
+            if not os.path.isdir(model_path):
                 continue
+            for img_file in os.listdir(model_path):
+                if img_file.endswith(('.png', '.jpg', '.jpeg')):
+                    image_classes.append(class_id)
+                    image_paths.append(os.path.join(model_path, img_file))
+    print(f"Total: {len(image_paths)} ，start processing...")
 
-            for model_id in os.listdir(class_path):  # 遍历模型
-                model_path = os.path.join(class_path, model_id)
-                if not os.path.isdir(model_path):
-                    continue
+    # 分批处理
+    batch_size = 10000  # 每批处理1万张图片
+    num_batches = (len(image_paths) + batch_size - 1) // batch_size
 
-                for img_file in os.listdir(model_path):  # 遍历图片
-                    if not img_file.endswith(('.png', '.jpg', '.jpeg')):
-                        continue
+    with h5py.File(h5_file_path, "w") as h5f:
+        # 预创建数据集
+        img_dataset = h5f.create_dataset(
+                "images",
+                shape=(len(image_paths), 3, r, r),  # 假设图片是RGB格式
+                dtype=np.uint8,
+                compression="gzip",
+                chunks=(1000, 3, r, r)  # 分块存储
+                # 分块存储将数据划分为固定大小的块（Chunk），每个块可以独立压缩、存储和读取 (避免整体压缩)
+                # 如果数据集需要动态扩展（例如逐步追加数据），分块存储可以更高效地管理数据的扩展
+                # 分块存储允许你逐块写入数据，而不需要一次性将整个数据集加载到内存中，从而减少内存占用
+                # 最后不满足1000的块仍会占用1000的空间
+                # 另外, 下次追加数据时, 不会自动合并到最后的残缺块, 得手动合并
+        )
+        class_dataset = h5f.create_dataset(
+                "classes",
+                shape=(len(image_paths),),
+                dtype='S10'  # 假设类别名称不超过10个字符
+        )
+        labels_dataset = h5f.create_dataset(
+                "labels",
+                shape=(len(image_paths), 3),  # 每个图片有3个连续标签属性
+                dtype=np.float32
+        )
 
-                    img_path = os.path.join(model_path, img_file)
+        # 分批处理图片
+        for batch_idx in range(num_batches):
+            start = batch_idx * batch_size
+            end = min((batch_idx + 1) * batch_size, len(image_paths))
+            batch_classes = image_classes[start:end]
+            batch_paths = image_paths[start:end]
 
-                    # 如果背景透明,增加特殊处理:转为纯白色
-                    if cfg.bg_transparent:
-                        # 注意: 如果存在渲染失败保存的残缺PNG图片,这里会报错
-                        img = Image.open(img_path).convert("RGBA")  # (H, W, 4)
-                        img_np = np.array(img)  # 转换为 NumPy 数组 (H, W, 4)
-                        # 分离 RGB 和 Alpha 通道
-                        # 注意: img_np[..., 3:]<=>img_np[..., 3:4]=>(H, W, 1)
-                        # 而写成img_np[..., 3]就会自动砍掉一个维度变成(H, W)
-                        rgb = img_np[..., :3]  # (H, W, 3)
-                        alpha = img_np[..., 3]  # (H, W)
-                        # 只修改完全透明的像素，保留半透明像素 (Alpha值越小越透明, alpha=0表示纯透明)
-                        rgb[alpha == 0] = 255  # 仅对 alpha = 0 的像素改为白色
-                        # 去掉 Alpha 通道（因为已经处理了透明背景）
-                        img_rgb = rgb
-                    else:
-                        img_rgb = Image.open(img_path).convert("RGB")  # 转换为 NumPy 数组 (H, W, 3)
-                        img_rgb = np.array(img_rgb)  # 转换为 NumPy 数组
+            # 多线程处理当前批次
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(process_image, batch_classes, batch_paths))
 
-                    # 转换后的shape是[h,w,c], 转换为[c,h,w], 跟自己的实验对齐
-                    img_rgb = np.transpose(img_rgb, (2, 0, 1))
+            # 过滤掉处理失败的图片
+            img_list, class_list, labels_list = [], [], []
+            for res in results:
+                if res is not None:
+                    img_list.append(res[0])
+                    class_list.append(res[1])
+                    labels_list.append(res[2])
 
-                    # 解析标签 (文件名由其标签属性构成)
-                    labels = list(map(float, img_file.replace('.png', '').split('_')))
+            # 将当前批次写入HDF5
+            img_dataset[start:end] = np.array(img_list, dtype=np.uint8)
+            class_dataset[start:end] = np.array(class_list, dtype='S10')
+            labels_dataset[start:end] = np.array(labels_list, dtype=np.float32)
 
-                    img_list.append(img_rgb)
-                    class_list.append(class_id)
-                    labels_list.append(labels)  # 注意,labels本身也是一个list
-                # end 遍历图片
-            # end 遍历3D模型
-        # end 遍历模型大类
+            # 释放内存
+            del img_list, class_list, labels_list, results
+            gc.collect()
 
-        # 转换为 NumPy 数组
-        img_array = np.array(img_list, dtype=np.uint8)
-        class_array = np.array(class_list, dtype='S')  # 字符串存储
-        labels_array = np.array(labels_list, dtype=np.float32)
-
-        # 存入 H5 文件
-        h5f.create_dataset("images", data=img_array, compression="gzip")
-        h5f.create_dataset("classes", data=class_array)
-        h5f.create_dataset("labels", data=labels_array)
+            print(f"Processed batch {batch_idx + 1}/{num_batches}")
 
     print(f"Saved: {h5_file_path}")
+
+
+def process_image(class_id, img_path):
+    """ 读取 & 预处理图片，返回 (img_data, class_id, labels) """
+    try:
+        img_file = os.path.basename(img_path)
+        labels = list(map(float, img_file.replace('.png', '').split('_')))
+
+        img = Image.open(img_path).convert("RGBA") if cfg.bg_transparent else Image.open(
+                img_path).convert("RGB")
+        img_np = np.array(img)  # (H, W, 3/4)
+
+        if cfg.bg_transparent:
+            rgb = img_np[..., :3]  # (H, W, 3)
+            alpha = img_np[..., 3]  # (H, W)
+            rgb[alpha == 0] = 255
+            img_np = rgb  # 去掉 Alpha 通道
+
+        img_np = np.transpose(img_np, (2, 0, 1))  # (3, H, W)
+        return img_np, class_id, labels
+
+    except Exception as e:
+        print(f"Error: {img_path}: {e}")
+        return None
+
+
+if __name__ == "__main__":
+    package_h5()
